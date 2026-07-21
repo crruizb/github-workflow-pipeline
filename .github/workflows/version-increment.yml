@@ -99,8 +99,8 @@ jobs:
             ${{ env.WORKING_DIRECTORY }}/gradle.properties
           git add ${{ env.WORKING_DIRECTORY }}/gradle.properties
           git commit -m "chore(backend): bump version to ${{ env.VERSION }} [ci skip]"
-          git pull --rebase origin master
-          git push origin HEAD:master
+          git pull --rebase origin main
+          git push origin HEAD:main
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Create Version Tag
