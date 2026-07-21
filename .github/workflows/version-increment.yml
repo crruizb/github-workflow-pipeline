@@ -1,0 +1,116 @@
+name: Version Increment Backend
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      custom_version:
+        description: "Custom version (e.g., for hotfixes like 1.2.4-p1)"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WORKING_DIRECTORY: "."
+jobs:
+  version-increment:
+    if: contains(toJson(github.event.commits), '[ci skip]') == false
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.increment.outputs.new_version }}
+      version_changed: ${{ steps.increment.outputs.version_changed }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Increment Version
+        id: increment
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: |
+          CURRENT_VERSION=$(grep "service_version" gradle.properties | cut -d'=' -f2)
+          echo "Current version from gradle.properties: $CURRENT_VERSION"
+
+          # Extract major, minor, and patch versions
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+          # Determine new version based on trigger type
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.custom_version }}" ]; then
+            NEW_VERSION="${{ github.event.inputs.custom_version }}"
+            echo "Using custom version: $CURRENT_VERSION → $NEW_VERSION"
+          else
+            # Automatic patch increment for push to master
+            NEW_PATCH=$((PATCH + 1))
+            NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+            echo "Automatic patch increment: $CURRENT_VERSION → $NEW_VERSION"
+          fi
+
+          # Check if version actually changed
+          if [ "$CURRENT_VERSION" = "$NEW_VERSION" ]; then
+            echo "Version unchanged: $NEW_VERSION"
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Update gradle.properties with new version
+          sed -i "s/service_version=$CURRENT_VERSION/service_version=$NEW_VERSION/" gradle.properties
+
+          echo "New version: $NEW_VERSION"
+          echo "version_changed=true" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Upload updated gradle.properties
+        if: steps.increment.outputs.version_changed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gradle-properties-backend
+          path: ${{ env.WORKING_DIRECTORY }}/gradle.properties
+          retention-days: 1
+
+      - run: sleep 60
+
+  commit-version:
+    needs: [version-increment]
+    if: needs.version-increment.outputs.version_changed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-increment.outputs.new_version }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Commit Version Update
+        id: commit-version
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          sed -i -E "s/^service_version=.*/service_version=${VERSION}/" \
+            ${{ env.WORKING_DIRECTORY }}/gradle.properties
+          git add ${{ env.WORKING_DIRECTORY }}/gradle.properties
+          git commit -m "chore(backend): bump version to ${{ env.VERSION }} [ci skip]"
+          git pull --rebase origin master
+          git push origin HEAD:master
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Version Tag
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/version-v${{ env.VERSION }}`,
+              sha: `${{ steps.commit-version.outputs.sha }}`
+            })
